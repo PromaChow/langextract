@@ -1,188 +1,128 @@
 name: Require linked issue with community support
-
 on:
-  pull_request_target:
-    types: [opened, edited, synchronize, reopened, ready_for_review]
-
-permissions:
-  contents: read
-  issues: write
-  pull-requests: write
+  push:
+    branches:
+      - main
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
-
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref
+    }}
 jobs:
   enforce:
     if: github.event_name == 'pull_request_target' && !github.event.pull_request.draft
     runs-on: ubuntu-latest
-
     steps:
+      - name: Start Energy Measurement
+        uses: green-coding-solutions/eco-ci-energy-estimation@862050e4f01f65b1436e5eca18ba4bd85562f0de
+        with:
+          json-output: true
+          task: start-measurement
       - name: Check linked issue and community support
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            // Strip code blocks and inline code to avoid false matches
-            const stripCode = txt =>
-              txt.replace(/```[\s\S]*?```/g, '').replace(/`[^`]*`/g, '');
-
-            // Combine title + body for comprehensive search
-            const prText = stripCode(`${context.payload.pull_request.title || ''}\n${context.payload.pull_request.body || ''}`);
-
-            // Issue reference pattern: #123, org/repo#123, or full URL (with http/https and optional www)
-            const issueRef = String.raw`(?:#(?<num>\d+)|(?<o1>[\w.-]+)\/(?<r1>[\w.-]+)#(?<n1>\d+)|https?:\/\/(?:www\.)?github\.com\/(?<o2>[\w.-]+)\/(?<r2>[\w.-]+)\/issues\/(?<n2>\d+))`;
-
-            // Keywords - supporting common variants
-            const closingRe = new RegExp(String.raw`\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s+${issueRef}`, 'gi');
-            const referenceRe = new RegExp(String.raw`\b(?:related\s+to|relates\s+to|refs?|part\s+of|addresses|see(?:\s+also)?|depends\s+on|blocked\s+by|supersedes)\b\s*:?\s+${issueRef}`, 'gi');
-
-            // Gather all matches
-            const closings = [...prText.matchAll(closingRe)];
-            const references = [...prText.matchAll(referenceRe)];
-            const first = closings[0] || references[0];
-
-            // Check for draft PRs and bots
-            const pr = context.payload.pull_request;
-            const isDraft = !!pr.draft;
-            const login = pr.user.login;
-            const isBot = pr.user.type === 'Bot' || /\[bot\]$/.test(login);
-
-            if (isDraft || isBot) {
-              core.info('Draft or bot PR – skipping enforcement');
-              return;
-            }
-
-            // Check if PR author is a maintainer
-            let authorPerm = 'none';
-            try {
-              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                username: pr.user.login,
-              });
-              authorPerm = data.permission || 'none';
-            } catch (_) {
-              // User might not have any permissions
-            }
-
-            core.info(`Author permission: ${authorPerm}`);
-            const isMaintainer = ['admin', 'maintain'].includes(authorPerm);  // Removed 'write' for stricter maintainer definition
-
-            // Maintainers bypass entirely
-            if (isMaintainer) {
-              core.info(`Maintainer ${pr.user.login} - bypassing linked issue requirement`);
-              return;
-            }
-
-            if (!first) {
-              // Check for existing comment to avoid duplicates
-              const MARKER = '<!-- linkcheck:missing-issue -->';
-              const existing = await github.paginate(github.rest.issues.listComments, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.payload.pull_request.number,
-                per_page: 100,
-              });
-              const alreadyLeft = existing.some(c => c.body && c.body.includes(MARKER));
-
-              if (!alreadyLeft) {
-                const contribUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/CONTRIBUTING.md#pull-request-guidelines`;
-                const commentBody = [
-                  'No linked issues found. Please link an issue in your pull request description or title.',
-                  '',
-                  `Per our [Contributing Guidelines](${contribUrl}), all PRs must:`,
-                  '- Reference an issue with one of:',
-                  '  - **Closing keywords**: `Fixes #123`, `Closes #123`, `Resolves #123` (auto-closes on merge in the same repository)',
-                  '  - **Reference keywords**: `Related to #123`, `Refs #123`, `Part of #123`, `See #123` (links without closing)',
-                  '- The linked issue should have 5+ 👍 reactions from unique users (excluding bots and the PR author)',
-                  '- Include discussion demonstrating the importance of the change',
-                  '',
-                  'You can also use cross-repo references like `owner/repo#123` or full URLs.',
-                  '',
-                  MARKER
-                ].join('\n');
-
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: context.payload.pull_request.number,
-                  body: commentBody
-                });
-              }
-
-              core.setFailed('No linked issue found. Use "Fixes #123" to close an issue or "Related to #123" to reference it.');
-              return;
-            }
-
-            // Resolve owner/repo/number, defaulting to the current repo
-            const groups = first.groups || {};
-            const owner = groups.o1 || groups.o2 || context.repo.owner;
-            const repo = groups.r1 || groups.r2 || context.repo.repo;
-            const issue_number = Number(groups.num || groups.n1 || groups.n2);
-
-            // Validate issue number
-            if (!Number.isInteger(issue_number) || issue_number <= 0) {
-              core.setFailed(
-                'Found a potential issue link but no valid number. ' +
-                'Use "Fixes #123" or "Related to owner/repo#123".'
-              );
-              return;
-            }
-
-            core.info(`Found linked issue: ${owner}/${repo}#${issue_number}`);
-
-            // Count unique users who reacted with 👍 on the linked issue (excluding bots and PR author)
-            try {
-              const reactions = await github.paginate(github.rest.reactions.listForIssue, {
-                owner,
-                repo,
-                issue_number,
-                per_page: 100,
-              });
-
-              const prAuthorId = pr.user.id;
-              const uniqueThumbs = new Set(
-                reactions
-                  .filter(r =>
-                    r.content === '+1' &&
-                    r.user &&
-                    r.user.id !== prAuthorId &&
-                    r.user.type !== 'Bot' &&
-                    !String(r.user.login || '').endsWith('[bot]')
-                  )
-                  .map(r => r.user.id)
-              ).size;
-
-              core.info(`Issue ${owner}/${repo}#${issue_number} has ${uniqueThumbs} unique 👍 reactions`);
-
-              const REQUIRED_THUMBS_UP = 5;
-              if (uniqueThumbs < REQUIRED_THUMBS_UP) {
-                core.setFailed(`Linked issue ${owner}/${repo}#${issue_number} has only ${uniqueThumbs} 👍 (need ${REQUIRED_THUMBS_UP}).`);
-                return;
-              }
-            } catch (error) {
-              const isSameRepo = owner === context.repo.owner && repo === context.repo.repo;
-              if (error.status === 404 || error.status === 403) {
-                if (!isSameRepo) {
-                  core.setFailed(
-                    `Linked issue ${owner}/${repo}#${issue_number} is not accessible. ` +
-                    `Please link to an issue in ${context.repo.owner}/${context.repo.repo} or a public repo.`
-                  );
-                } else {
-                  core.info(`Cannot access reactions for ${owner}/${repo}#${issue_number}; skipping enforcement for same-repo issue.`);
-                }
-                return;
-              }
-
-              // Any other error should fail to prevent accidental bypass
-              const msg = (error && error.message) ? String(error.message).toLowerCase() : '';
-              const isRateLimit = msg.includes('rate limit') || error?.headers?.['x-ratelimit-remaining'] === '0';
-
-              if (isRateLimit) {
-                core.setFailed(`Rate limit while checking reactions for ${owner}/${repo}#${issue_number}. Please retry the workflow.`);
-              } else {
-                core.setFailed(`Unexpected error checking reactions for ${owner}/${repo}#${issue_number}: ${error?.message || error}`);
-              }
-            }
+          script: "// Strip code blocks and inline code to avoid false matches\nconst\
+            \ stripCode = txt =>\n  txt.replace(/```[\\s\\S]*?```/g, '').replace(/`[^`]*`/g,\
+            \ '');\n\n// Combine title + body for comprehensive search\nconst prText\
+            \ = stripCode(`${context.payload.pull_request.title || ''}\\n${context.payload.pull_request.body\
+            \ || ''}`);\n\n// Issue reference pattern: #123, org/repo#123, or full\
+            \ URL (with http/https and optional www)\nconst issueRef = String.raw`(?:#(?<num>\\\
+            d+)|(?<o1>[\\w.-]+)\\/(?<r1>[\\w.-]+)#(?<n1>\\d+)|https?:\\/\\/(?:www\\\
+            .)?github\\.com\\/(?<o2>[\\w.-]+)\\/(?<r2>[\\w.-]+)\\/issues\\/(?<n2>\\\
+            d+))`;\n\n// Keywords - supporting common variants\nconst closingRe =\
+            \ new RegExp(String.raw`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\\
+            b\\s*:?\\s+${issueRef}`, 'gi');\nconst referenceRe = new RegExp(String.raw`\\\
+            b(?:related\\s+to|relates\\s+to|refs?|part\\s+of|addresses|see(?:\\s+also)?|depends\\\
+            s+on|blocked\\s+by|supersedes)\\b\\s*:?\\s+${issueRef}`, 'gi');\n\n//\
+            \ Gather all matches\nconst closings = [...prText.matchAll(closingRe)];\n\
+            const references = [...prText.matchAll(referenceRe)];\nconst first = closings[0]\
+            \ || references[0];\n\n// Check for draft PRs and bots\nconst pr = context.payload.pull_request;\n\
+            const isDraft = !!pr.draft;\nconst login = pr.user.login;\nconst isBot\
+            \ = pr.user.type === 'Bot' || /\\[bot\\]$/.test(login);\n\nif (isDraft\
+            \ || isBot) {\n  core.info('Draft or bot PR \u2013 skipping enforcement');\n\
+            \  return;\n}\n\n// Check if PR author is a maintainer\nlet authorPerm\
+            \ = 'none';\ntry {\n  const { data } = await github.rest.repos.getCollaboratorPermissionLevel({\n\
+            \    owner: context.repo.owner,\n    repo: context.repo.repo,\n    username:\
+            \ pr.user.login,\n  });\n  authorPerm = data.permission || 'none';\n}\
+            \ catch (_) {\n  // User might not have any permissions\n}\n\ncore.info(`Author\
+            \ permission: ${authorPerm}`);\nconst isMaintainer = ['admin', 'maintain'].includes(authorPerm);\
+            \  // Removed 'write' for stricter maintainer definition\n\n// Maintainers\
+            \ bypass entirely\nif (isMaintainer) {\n  core.info(`Maintainer ${pr.user.login}\
+            \ - bypassing linked issue requirement`);\n  return;\n}\n\nif (!first)\
+            \ {\n  // Check for existing comment to avoid duplicates\n  const MARKER\
+            \ = '<!-- linkcheck:missing-issue -->';\n  const existing = await github.paginate(github.rest.issues.listComments,\
+            \ {\n    owner: context.repo.owner,\n    repo: context.repo.repo,\n  \
+            \  issue_number: context.payload.pull_request.number,\n    per_page: 100,\n\
+            \  });\n  const alreadyLeft = existing.some(c => c.body && c.body.includes(MARKER));\n\
+            \n  if (!alreadyLeft) {\n    const contribUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/CONTRIBUTING.md#pull-request-guidelines`;\n\
+            \    const commentBody = [\n      'No linked issues found. Please link\
+            \ an issue in your pull request description or title.',\n      '',\n \
+            \     `Per our [Contributing Guidelines](${contribUrl}), all PRs must:`,\n\
+            \      '- Reference an issue with one of:',\n      '  - **Closing keywords**:\
+            \ `Fixes #123`, `Closes #123`, `Resolves #123` (auto-closes on merge in\
+            \ the same repository)',\n      '  - **Reference keywords**: `Related\
+            \ to #123`, `Refs #123`, `Part of #123`, `See #123` (links without closing)',\n\
+            \      '- The linked issue should have 5+ \U0001F44D reactions from unique\
+            \ users (excluding bots and the PR author)',\n      '- Include discussion\
+            \ demonstrating the importance of the change',\n      '',\n      'You\
+            \ can also use cross-repo references like `owner/repo#123` or full URLs.',\n\
+            \      '',\n      MARKER\n    ].join('\\n');\n\n    await github.rest.issues.createComment({\n\
+            \      owner: context.repo.owner,\n      repo: context.repo.repo,\n  \
+            \    issue_number: context.payload.pull_request.number,\n      body: commentBody\n\
+            \    });\n  }\n\n  core.setFailed('No linked issue found. Use \"Fixes\
+            \ #123\" to close an issue or \"Related to #123\" to reference it.');\n\
+            \  return;\n}\n\n// Resolve owner/repo/number, defaulting to the current\
+            \ repo\nconst groups = first.groups || {};\nconst owner = groups.o1 ||\
+            \ groups.o2 || context.repo.owner;\nconst repo = groups.r1 || groups.r2\
+            \ || context.repo.repo;\nconst issue_number = Number(groups.num || groups.n1\
+            \ || groups.n2);\n\n// Validate issue number\nif (!Number.isInteger(issue_number)\
+            \ || issue_number <= 0) {\n  core.setFailed(\n    'Found a potential issue\
+            \ link but no valid number. ' +\n    'Use \"Fixes #123\" or \"Related\
+            \ to owner/repo#123\".'\n  );\n  return;\n}\n\ncore.info(`Found linked\
+            \ issue: ${owner}/${repo}#${issue_number}`);\n\n// Count unique users\
+            \ who reacted with \U0001F44D on the linked issue (excluding bots and\
+            \ PR author)\ntry {\n  const reactions = await github.paginate(github.rest.reactions.listForIssue,\
+            \ {\n    owner,\n    repo,\n    issue_number,\n    per_page: 100,\n  });\n\
+            \n  const prAuthorId = pr.user.id;\n  const uniqueThumbs = new Set(\n\
+            \    reactions\n      .filter(r =>\n        r.content === '+1' &&\n  \
+            \      r.user &&\n        r.user.id !== prAuthorId &&\n        r.user.type\
+            \ !== 'Bot' &&\n        !String(r.user.login || '').endsWith('[bot]')\n\
+            \      )\n      .map(r => r.user.id)\n  ).size;\n\n  core.info(`Issue\
+            \ ${owner}/${repo}#${issue_number} has ${uniqueThumbs} unique \U0001F44D\
+            \ reactions`);\n\n  const REQUIRED_THUMBS_UP = 5;\n  if (uniqueThumbs\
+            \ < REQUIRED_THUMBS_UP) {\n    core.setFailed(`Linked issue ${owner}/${repo}#${issue_number}\
+            \ has only ${uniqueThumbs} \U0001F44D (need ${REQUIRED_THUMBS_UP}).`);\n\
+            \    return;\n  }\n} catch (error) {\n  const isSameRepo = owner === context.repo.owner\
+            \ && repo === context.repo.repo;\n  if (error.status === 404 || error.status\
+            \ === 403) {\n    if (!isSameRepo) {\n      core.setFailed(\n        `Linked\
+            \ issue ${owner}/${repo}#${issue_number} is not accessible. ` +\n    \
+            \    `Please link to an issue in ${context.repo.owner}/${context.repo.repo}\
+            \ or a public repo.`\n      );\n    } else {\n      core.info(`Cannot\
+            \ access reactions for ${owner}/${repo}#${issue_number}; skipping enforcement\
+            \ for same-repo issue.`);\n    }\n    return;\n  }\n\n  // Any other error\
+            \ should fail to prevent accidental bypass\n  const msg = (error && error.message)\
+            \ ? String(error.message).toLowerCase() : '';\n  const isRateLimit = msg.includes('rate\
+            \ limit') || error?.headers?.['x-ratelimit-remaining'] === '0';\n\n  if\
+            \ (isRateLimit) {\n    core.setFailed(`Rate limit while checking reactions\
+            \ for ${owner}/${repo}#${issue_number}. Please retry the workflow.`);\n\
+            \  } else {\n    core.setFailed(`Unexpected error checking reactions for\
+            \ ${owner}/${repo}#${issue_number}: ${error?.message || error}`);\n  }\n\
+            }\n"
+      - id: display-measurement
+        name: Display Energy Results
+        uses: green-coding-solutions/eco-ci-energy-estimation@862050e4f01f65b1436e5eca18ba4bd85562f0de
+        with:
+          json-output: true
+          task: display-results
+      - name: Save Total Energy Consumption Data
+        run: echo '${{ steps.final-measurement.outputs.data-total-json }}' > total_energy_consumption.json
+      - name: Upload Energy Consumption Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-energy-consumption
+          path: total_energy_consumption.json
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write

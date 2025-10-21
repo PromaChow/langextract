@@ -1,166 +1,107 @@
-# Copyright 2025 Google LLC.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 name: Auto Update PR
-
 on:
   push:
-    branches: [main]
-  schedule:
-    # Run daily at 2 AM UTC to catch stale PRs
-    - cron: '0 2 * * *'
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: 'PR number to update (optional, updates all if not specified)'
-        required: false
-        type: string
-
-permissions:
-  contents: write  # Required for updateBranch API
-  pull-requests: write
-  issues: write
+    branches:
+      - main
 
 jobs:
   update-prs:
-    runs-on: ubuntu-latest
     concurrency:
-      group: auto-update-pr-${{ github.event_name }}
       cancel-in-progress: true
+      group: auto-update-pr-${{ github.event_name }}
+    runs-on: ubuntu-latest
     steps:
+      - name: Start Energy Measurement
+        uses: green-coding-solutions/eco-ci-energy-estimation@862050e4f01f65b1436e5eca18ba4bd85562f0de
+        with:
+          json-output: true
+          task: start-measurement
       - name: Update PRs that are behind main
         uses: actions/github-script@v7
         with:
-          script: |
-            const prNumber = context.payload.inputs?.pr_number;
-
-            // Get list of open PRs
-            const prs = prNumber
-              ? [(await github.rest.pulls.get({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  pull_number: parseInt(prNumber)
-                })).data]
-              : await github.paginate(github.rest.pulls.list, {
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  state: 'open',
-                  sort: 'updated',
-                  direction: 'desc'
-                });
-
-            console.log(`Found ${prs.length} open PRs to check`);
-
-            // Constants for comment flood control
-            const UPDATE_COMMENT_COOLDOWN_DAYS = 7;
-            const COOLDOWN_MS = UPDATE_COMMENT_COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
-
-            for (const pr of prs) {
-              // Skip bot PRs and drafts
-              if (pr.user.login.includes('[bot]')) {
-                console.log(`Skipping bot PR #${pr.number} from ${pr.user.login}`);
-                continue;
-              }
-              if (pr.draft) {
-                console.log(`Skipping draft PR #${pr.number}`);
-                continue;
-              }
-
-              try {
-                // Check if PR is behind main (base...head comparison)
-                const { data: comparison } = await github.rest.repos.compareCommits({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  base: pr.base.ref,  // main branch
-                  head: `${pr.head.repo.owner.login}:${pr.head.ref}`  // Fully qualified ref for forks
-                });
-
-                if (comparison.behind_by > 0) {
-                  console.log(`PR #${pr.number} is ${comparison.behind_by} commits behind ${pr.base.ref}`);
-
-                  // Check if the PR allows maintainer edits
-                  if (pr.maintainer_can_modify) {
-                    // Try to update the branch
-                    try {
-                      await github.rest.pulls.updateBranch({
-                        owner: context.repo.owner,
-                        repo: context.repo.repo,
-                        pull_number: pr.number
-                      });
-
-                      console.log(`✅ Updated PR #${pr.number}`);
-
-                      // Add a comment
-                      await github.rest.issues.createComment({
-                        owner: context.repo.owner,
-                        repo: context.repo.repo,
-                        issue_number: pr.number,
-                        body: `🔄 **Branch Updated**\n\nYour branch was ${comparison.behind_by} commits behind \`${pr.base.ref}\` and has been automatically updated. CI checks will re-run shortly.`
-                      });
-                    } catch (updateError) {
-                      console.log(`Could not auto-update PR #${pr.number}: ${updateError.message}`);
-
-                      // Determine the reason for failure
-                      let failureReason = '';
-                      if (updateError.status === 409 || updateError.message.includes('merge conflict')) {
-                        failureReason = '\n\n**Note:** Automatic update failed due to merge conflicts. Please resolve them manually.';
-                      } else if (updateError.status === 422) {
-                        failureReason = '\n\n**Note:** Cannot push to fork. Please update manually.';
-                      }
-
-                      // Notify the contributor to update manually
-                      await github.rest.issues.createComment({
-                        owner: context.repo.owner,
-                        repo: context.repo.repo,
-                        issue_number: pr.number,
-                        body: `⚠️ **Branch Update Required**\n\nYour branch is ${comparison.behind_by} commits behind \`${pr.base.ref}\`.${failureReason}\n\nPlease update your branch:\n\n\`\`\`bash\ngit fetch origin ${pr.base.ref}\ngit merge origin/${pr.base.ref}\ngit push\n\`\`\`\n\nOr use GitHub's "Update branch" button if available.`
-                      });
-                    }
-                  } else {
-                    // Can't modify, just notify
-                    console.log(`PR #${pr.number} doesn't allow maintainer edits`);
-
-                    // Check if we already commented recently (within last 7 days)
-                    const { data: comments } = await github.rest.issues.listComments({
-                      owner: context.repo.owner,
-                      repo: context.repo.repo,
-                      issue_number: pr.number,
-                      since: new Date(Date.now() - COOLDOWN_MS).toISOString()
-                    });
-
-                    const hasRecentUpdateComment = comments.some(c =>
-                      c.body?.includes('Branch Update Required') &&
-                      c.user?.login === 'github-actions[bot]'
-                    );
-
-                    if (!hasRecentUpdateComment) {
-                      await github.rest.issues.createComment({
-                        owner: context.repo.owner,
-                        repo: context.repo.repo,
-                        issue_number: pr.number,
-                        body: `⚠️ **Branch Update Required**\n\nYour branch is ${comparison.behind_by} commits behind \`${pr.base.ref}\`. Please update your branch to ensure CI checks run with the latest code:\n\n\`\`\`bash\ngit fetch origin ${pr.base.ref}\ngit merge origin/${pr.base.ref}\ngit push\n\`\`\`\n\nNote: Enable "Allow edits by maintainers" to allow automatic updates.`
-                      });
-                    }
-                  }
-                } else {
-                  console.log(`PR #${pr.number} is up to date`);
-                }
-              } catch (error) {
-                console.error(`Error processing PR #${pr.number}:`, error.message);
-              }
-            }
-
-            // Log rate limit status
-            const { data: rateLimit } = await github.rest.rateLimit.get();
-            console.log(`API rate limit remaining: ${rateLimit.rate.remaining}/${rateLimit.rate.limit}`);
+          script: "const prNumber = context.payload.inputs?.pr_number;\n\n// Get list\
+            \ of open PRs\nconst prs = prNumber\n  ? [(await github.rest.pulls.get({\n\
+            \      owner: context.repo.owner,\n      repo: context.repo.repo,\n  \
+            \    pull_number: parseInt(prNumber)\n    })).data]\n  : await github.paginate(github.rest.pulls.list,\
+            \ {\n      owner: context.repo.owner,\n      repo: context.repo.repo,\n\
+            \      state: 'open',\n      sort: 'updated',\n      direction: 'desc'\n\
+            \    });\n\nconsole.log(`Found ${prs.length} open PRs to check`);\n\n\
+            // Constants for comment flood control\nconst UPDATE_COMMENT_COOLDOWN_DAYS\
+            \ = 7;\nconst COOLDOWN_MS = UPDATE_COMMENT_COOLDOWN_DAYS * 24 * 60 * 60\
+            \ * 1000;\n\nfor (const pr of prs) {\n  // Skip bot PRs and drafts\n \
+            \ if (pr.user.login.includes('[bot]')) {\n    console.log(`Skipping bot\
+            \ PR #${pr.number} from ${pr.user.login}`);\n    continue;\n  }\n  if\
+            \ (pr.draft) {\n    console.log(`Skipping draft PR #${pr.number}`);\n\
+            \    continue;\n  }\n\n  try {\n    // Check if PR is behind main (base...head\
+            \ comparison)\n    const { data: comparison } = await github.rest.repos.compareCommits({\n\
+            \      owner: context.repo.owner,\n      repo: context.repo.repo,\n  \
+            \    base: pr.base.ref,  // main branch\n      head: `${pr.head.repo.owner.login}:${pr.head.ref}`\
+            \  // Fully qualified ref for forks\n    });\n\n    if (comparison.behind_by\
+            \ > 0) {\n      console.log(`PR #${pr.number} is ${comparison.behind_by}\
+            \ commits behind ${pr.base.ref}`);\n\n      // Check if the PR allows\
+            \ maintainer edits\n      if (pr.maintainer_can_modify) {\n        //\
+            \ Try to update the branch\n        try {\n          await github.rest.pulls.updateBranch({\n\
+            \            owner: context.repo.owner,\n            repo: context.repo.repo,\n\
+            \            pull_number: pr.number\n          });\n\n          console.log(`\u2705\
+            \ Updated PR #${pr.number}`);\n\n          // Add a comment\n        \
+            \  await github.rest.issues.createComment({\n            owner: context.repo.owner,\n\
+            \            repo: context.repo.repo,\n            issue_number: pr.number,\n\
+            \            body: `\U0001F504 **Branch Updated**\\n\\nYour branch was\
+            \ ${comparison.behind_by} commits behind \\`${pr.base.ref}\\` and has\
+            \ been automatically updated. CI checks will re-run shortly.`\n      \
+            \    });\n        } catch (updateError) {\n          console.log(`Could\
+            \ not auto-update PR #${pr.number}: ${updateError.message}`);\n\n    \
+            \      // Determine the reason for failure\n          let failureReason\
+            \ = '';\n          if (updateError.status === 409 || updateError.message.includes('merge\
+            \ conflict')) {\n            failureReason = '\\n\\n**Note:** Automatic\
+            \ update failed due to merge conflicts. Please resolve them manually.';\n\
+            \          } else if (updateError.status === 422) {\n            failureReason\
+            \ = '\\n\\n**Note:** Cannot push to fork. Please update manually.';\n\
+            \          }\n\n          // Notify the contributor to update manually\n\
+            \          await github.rest.issues.createComment({\n            owner:\
+            \ context.repo.owner,\n            repo: context.repo.repo,\n        \
+            \    issue_number: pr.number,\n            body: `\u26A0\uFE0F **Branch\
+            \ Update Required**\\n\\nYour branch is ${comparison.behind_by} commits\
+            \ behind \\`${pr.base.ref}\\`.${failureReason}\\n\\nPlease update your\
+            \ branch:\\n\\n\\`\\`\\`bash\\ngit fetch origin ${pr.base.ref}\\ngit merge\
+            \ origin/${pr.base.ref}\\ngit push\\n\\`\\`\\`\\n\\nOr use GitHub's \"\
+            Update branch\" button if available.`\n          });\n        }\n    \
+            \  } else {\n        // Can't modify, just notify\n        console.log(`PR\
+            \ #${pr.number} doesn't allow maintainer edits`);\n\n        // Check\
+            \ if we already commented recently (within last 7 days)\n        const\
+            \ { data: comments } = await github.rest.issues.listComments({\n     \
+            \     owner: context.repo.owner,\n          repo: context.repo.repo,\n\
+            \          issue_number: pr.number,\n          since: new Date(Date.now()\
+            \ - COOLDOWN_MS).toISOString()\n        });\n\n        const hasRecentUpdateComment\
+            \ = comments.some(c =>\n          c.body?.includes('Branch Update Required')\
+            \ &&\n          c.user?.login === 'github-actions[bot]'\n        );\n\n\
+            \        if (!hasRecentUpdateComment) {\n          await github.rest.issues.createComment({\n\
+            \            owner: context.repo.owner,\n            repo: context.repo.repo,\n\
+            \            issue_number: pr.number,\n            body: `\u26A0\uFE0F\
+            \ **Branch Update Required**\\n\\nYour branch is ${comparison.behind_by}\
+            \ commits behind \\`${pr.base.ref}\\`. Please update your branch to ensure\
+            \ CI checks run with the latest code:\\n\\n\\`\\`\\`bash\\ngit fetch origin\
+            \ ${pr.base.ref}\\ngit merge origin/${pr.base.ref}\\ngit push\\n\\`\\\
+            `\\`\\n\\nNote: Enable \"Allow edits by maintainers\" to allow automatic\
+            \ updates.`\n          });\n        }\n      }\n    } else {\n      console.log(`PR\
+            \ #${pr.number} is up to date`);\n    }\n  } catch (error) {\n    console.error(`Error\
+            \ processing PR #${pr.number}:`, error.message);\n  }\n}\n\n// Log rate\
+            \ limit status\nconst { data: rateLimit } = await github.rest.rateLimit.get();\n\
+            console.log(`API rate limit remaining: ${rateLimit.rate.remaining}/${rateLimit.rate.limit}`);\n"
+      - id: display-measurement
+        name: Display Energy Results
+        uses: green-coding-solutions/eco-ci-energy-estimation@862050e4f01f65b1436e5eca18ba4bd85562f0de
+        with:
+          json-output: true
+          task: display-results
+      - name: Save Total Energy Consumption Data
+        run: echo '${{ steps.final-measurement.outputs.data-total-json }}' > total_energy_consumption.json
+      - name: Upload Energy Consumption Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-energy-consumption
+          path: total_energy_consumption.json
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write

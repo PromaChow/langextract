@@ -1,130 +1,90 @@
 name: Check PR size
-
 on:
-  pull_request_target:
-    types: [opened, synchronize, reopened]
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: 'PR number to check (optional)'
-        required: false
-        type: string
-
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
+  push:
+    branches:
+      - main
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
-
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id
+    }}
 jobs:
   size:
     runs-on: ubuntu-latest
     steps:
-      - name: Get PR data for manual trigger
+      - name: Start Energy Measurement
+        uses: green-coding-solutions/eco-ci-energy-estimation@862050e4f01f65b1436e5eca18ba4bd85562f0de
+        with:
+          json-output: true
+          task: start-measurement
+      - id: get_pr
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.pr_number
-        id: get_pr
+        name: Get PR data for manual trigger
         uses: actions/github-script@v7
         with:
           result-encoding: string
-          script: |
-            const { data } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: ${{ github.event.inputs.pr_number }}
-            });
-            return JSON.stringify(data);
-
-      - name: Evaluate PR size
-        if: github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && github.event.inputs.pr_number)
-        uses: actions/github-script@v7
-        env:
+          script: "const { data } = await github.rest.pulls.get({\n  owner: context.repo.owner,\n\
+            \  repo: context.repo.repo,\n  pull_number: ${{ github.event.inputs.pr_number\
+            \ }}\n});\nreturn JSON.stringify(data);\n"
+      - env:
           PR_JSON: ${{ steps.get_pr.outputs.result }}
+        if: github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch'
+          && github.event.inputs.pr_number)
+        name: Evaluate PR size
+        uses: actions/github-script@v7
         with:
-          script: |
-            const pr = context.payload.pull_request || JSON.parse(process.env.PR_JSON || '{}');
-            if (!pr || !pr.number) {
-              core.setFailed('Unable to resolve PR data. For workflow_dispatch, pass a valid pr_number.');
-              return;
-            }
-
-            // Check for draft PRs and bots
-            const isDraft = !!pr.draft;
-            const login = pr.user.login;
-            const isBot = pr.user.type === 'Bot' || /\[bot\]$/.test(login);
-
-            if (isDraft || isBot) {
-              core.info('Draft or bot PR – skipping size enforcement');
-              return;
-            }
-
-            const totalChanges = pr.additions + pr.deletions;
-            core.info(`PR contains ${pr.additions} additions and ${pr.deletions} deletions (${totalChanges} total)`);
-
-            const sizeLabel =
-              totalChanges < 50   ? 'size/XS' :
-              totalChanges < 150  ? 'size/S'  :
-              totalChanges < 600  ? 'size/M'  :
-              totalChanges < 1000 ? 'size/L'  : 'size/XL';
-
-            // Re-fetch labels to avoid acting on stale payload data
-            const { data: freshIssue } = await github.rest.issues.get({
-              ...context.repo,
-              issue_number: pr.number
-            });
-            const currentLabels = (freshIssue.labels || []).map(l => l.name);
-
-            // Remove old size labels before adding new one
-            const allSizeLabels = ['size/XS', 'size/S', 'size/M', 'size/L', 'size/XL'];
-            const toRemove = currentLabels.filter(name => allSizeLabels.includes(name) && name !== sizeLabel);
-
-            for (const name of toRemove) {
-              try {
-                await github.rest.issues.removeLabel({
-                  ...context.repo,
-                  issue_number: pr.number,
-                  name
-                });
-              } catch (_) {
-                // Ignore if already removed
-              }
-            }
-
-            await github.rest.issues.addLabels({
-              ...context.repo,
-              issue_number: pr.number,
-              labels: [sizeLabel]
-            });
-
-            // Check if PR author is a maintainer
-            let authorPerm = 'none';
-            try {
-              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                username: pr.user.login,
-              });
-              authorPerm = data.permission || 'none';
-            } catch (_) {
-              // User might not have any permissions
-            }
-
-            core.info(`Author permission: ${authorPerm}`);
-            const isMaintainer = ['admin', 'maintain'].includes(authorPerm); // Stricter maintainer definition
-
-            // Check for bypass label (using fresh labels)
-            const hasBypass = currentLabels.includes('bypass:size-limit');
-
-            const MAX_LINES = 1000;
-            if (totalChanges > MAX_LINES) {
-              if (isMaintainer || hasBypass) {
-                core.info(`${isMaintainer ? 'Maintainer' : 'Bypass label'} - allowing large PR with ${totalChanges} lines`);
-              } else {
-                core.setFailed(
-                  `This PR contains ${totalChanges} lines of changes, which exceeds the maximum of ${MAX_LINES} lines. ` +
-                  `Please split this into smaller, focused pull requests.`
-                );
-              }
-            }
+          script: "const pr = context.payload.pull_request || JSON.parse(process.env.PR_JSON\
+            \ || '{}');\nif (!pr || !pr.number) {\n  core.setFailed('Unable to resolve\
+            \ PR data. For workflow_dispatch, pass a valid pr_number.');\n  return;\n\
+            }\n\n// Check for draft PRs and bots\nconst isDraft = !!pr.draft;\nconst\
+            \ login = pr.user.login;\nconst isBot = pr.user.type === 'Bot' || /\\\
+            [bot\\]$/.test(login);\n\nif (isDraft || isBot) {\n  core.info('Draft\
+            \ or bot PR \u2013 skipping size enforcement');\n  return;\n}\n\nconst\
+            \ totalChanges = pr.additions + pr.deletions;\ncore.info(`PR contains\
+            \ ${pr.additions} additions and ${pr.deletions} deletions (${totalChanges}\
+            \ total)`);\n\nconst sizeLabel =\n  totalChanges < 50   ? 'size/XS' :\n\
+            \  totalChanges < 150  ? 'size/S'  :\n  totalChanges < 600  ? 'size/M'\
+            \  :\n  totalChanges < 1000 ? 'size/L'  : 'size/XL';\n\n// Re-fetch labels\
+            \ to avoid acting on stale payload data\nconst { data: freshIssue } =\
+            \ await github.rest.issues.get({\n  ...context.repo,\n  issue_number:\
+            \ pr.number\n});\nconst currentLabels = (freshIssue.labels || []).map(l\
+            \ => l.name);\n\n// Remove old size labels before adding new one\nconst\
+            \ allSizeLabels = ['size/XS', 'size/S', 'size/M', 'size/L', 'size/XL'];\n\
+            const toRemove = currentLabels.filter(name => allSizeLabels.includes(name)\
+            \ && name !== sizeLabel);\n\nfor (const name of toRemove) {\n  try {\n\
+            \    await github.rest.issues.removeLabel({\n      ...context.repo,\n\
+            \      issue_number: pr.number,\n      name\n    });\n  } catch (_) {\n\
+            \    // Ignore if already removed\n  }\n}\n\nawait github.rest.issues.addLabels({\n\
+            \  ...context.repo,\n  issue_number: pr.number,\n  labels: [sizeLabel]\n\
+            });\n\n// Check if PR author is a maintainer\nlet authorPerm = 'none';\n\
+            try {\n  const { data } = await github.rest.repos.getCollaboratorPermissionLevel({\n\
+            \    owner: context.repo.owner,\n    repo: context.repo.repo,\n    username:\
+            \ pr.user.login,\n  });\n  authorPerm = data.permission || 'none';\n}\
+            \ catch (_) {\n  // User might not have any permissions\n}\n\ncore.info(`Author\
+            \ permission: ${authorPerm}`);\nconst isMaintainer = ['admin', 'maintain'].includes(authorPerm);\
+            \ // Stricter maintainer definition\n\n// Check for bypass label (using\
+            \ fresh labels)\nconst hasBypass = currentLabels.includes('bypass:size-limit');\n\
+            \nconst MAX_LINES = 1000;\nif (totalChanges > MAX_LINES) {\n  if (isMaintainer\
+            \ || hasBypass) {\n    core.info(`${isMaintainer ? 'Maintainer' : 'Bypass\
+            \ label'} - allowing large PR with ${totalChanges} lines`);\n  } else\
+            \ {\n    core.setFailed(\n      `This PR contains ${totalChanges} lines\
+            \ of changes, which exceeds the maximum of ${MAX_LINES} lines. ` +\n \
+            \     `Please split this into smaller, focused pull requests.`\n    );\n\
+            \  }\n}\n"
+      - id: display-measurement
+        name: Display Energy Results
+        uses: green-coding-solutions/eco-ci-energy-estimation@862050e4f01f65b1436e5eca18ba4bd85562f0de
+        with:
+          json-output: true
+          task: display-results
+      - name: Save Total Energy Consumption Data
+        run: echo '${{ steps.final-measurement.outputs.data-total-json }}' > total_energy_consumption.json
+      - name: Upload Energy Consumption Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-energy-consumption
+          path: total_energy_consumption.json
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write

@@ -1,128 +1,113 @@
 name: Validate PR template
-
 on:
-  pull_request_target:
-    types: [opened, edited, synchronize, reopened]
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  pull-requests: read
+  push:
+    branches:
+      - main
 
 jobs:
   check:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Check PR author permissions
-        id: check
-        if: github.event_name == 'pull_request_target' && github.event.pull_request.draft == false
+      - name: Start Energy Measurement
+        uses: green-coding-solutions/eco-ci-energy-estimation@862050e4f01f65b1436e5eca18ba4bd85562f0de
+        with:
+          json-output: true
+          task: start-measurement
+      - id: check
+        if: github.event_name == 'pull_request_target' && github.event.pull_request.draft
+          == false
+        name: Check PR author permissions
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const pr = context.payload.pull_request;
-            const {owner, repo} = context.repo;
-            const actor = pr.user.login;
-            const authorType = pr.user.type;
-
-            // Check if PR author is a bot (e.g., Dependabot)
-            if (authorType === 'Bot') {
-              core.setOutput('skip_validation', 'true');
-              console.log(`Skipping validation for bot-authored PR: ${actor}`);
-              return;
-            }
-
-            // Check if this is a community provider PR (only modifies COMMUNITY_PROVIDERS.md)
-            const { data: files } = await github.rest.pulls.listFiles({
-              owner, repo,
-              pull_number: pr.number
-            });
-            
-            const isCommunityProviderPR = files.length === 1 && 
-                                          files[0].filename === 'COMMUNITY_PROVIDERS.md';
-            
-            if (isCommunityProviderPR) {
-              core.setOutput('is_community_provider', 'true');
-              console.log('Community provider PR detected - relaxed validation will apply');
-            } else {
-              core.setOutput('is_community_provider', 'false');
-            }
-
-            // Get permission level
-            try {
-              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
-                owner, repo, username: actor
-              });
-
-              const permission = data.permission; // admin|maintain|write|triage|read|none
-              console.log(`Actor ${actor} has permission level: ${permission}`);
-
-              // Check if user has write+ permissions
-              if (['admin', 'maintain', 'write'].includes(permission)) {
-                core.setOutput('skip_validation', 'true');
-                console.log(`Skipping validation for maintainer: ${actor} (${permission})`);
-              } else {
-                core.setOutput('skip_validation', 'false');
-                console.log(`Validation required for: ${actor} (${permission})`);
-              }
-            } catch (e) {
-              // If we can't determine permissions, require validation
-              core.setOutput('skip_validation', 'false');
-              core.warning(`Permission lookup failed: ${e.message}`);
-            }
-
-      - name: Validate PR template
-        if: |
-          github.event_name == 'pull_request_target' &&
-          github.event.pull_request.draft == false &&
-          steps.check.outputs.skip_validation != 'true'
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
+          script: "const pr = context.payload.pull_request;\nconst {owner, repo} =\
+            \ context.repo;\nconst actor = pr.user.login;\nconst authorType = pr.user.type;\n\
+            \n// Check if PR author is a bot (e.g., Dependabot)\nif (authorType ===\
+            \ 'Bot') {\n  core.setOutput('skip_validation', 'true');\n  console.log(`Skipping\
+            \ validation for bot-authored PR: ${actor}`);\n  return;\n}\n\n// Check\
+            \ if this is a community provider PR (only modifies COMMUNITY_PROVIDERS.md)\n\
+            const { data: files } = await github.rest.pulls.listFiles({\n  owner,\
+            \ repo,\n  pull_number: pr.number\n});\n\nconst isCommunityProviderPR\
+            \ = files.length === 1 && \n                              files[0].filename\
+            \ === 'COMMUNITY_PROVIDERS.md';\n\nif (isCommunityProviderPR) {\n  core.setOutput('is_community_provider',\
+            \ 'true');\n  console.log('Community provider PR detected - relaxed validation\
+            \ will apply');\n} else {\n  core.setOutput('is_community_provider', 'false');\n\
+            }\n\n// Get permission level\ntry {\n  const { data } = await github.rest.repos.getCollaboratorPermissionLevel({\n\
+            \    owner, repo, username: actor\n  });\n\n  const permission = data.permission;\
+            \ // admin|maintain|write|triage|read|none\n  console.log(`Actor ${actor}\
+            \ has permission level: ${permission}`);\n\n  // Check if user has write+\
+            \ permissions\n  if (['admin', 'maintain', 'write'].includes(permission))\
+            \ {\n    core.setOutput('skip_validation', 'true');\n    console.log(`Skipping\
+            \ validation for maintainer: ${actor} (${permission})`);\n  } else {\n\
+            \    core.setOutput('skip_validation', 'false');\n    console.log(`Validation\
+            \ required for: ${actor} (${permission})`);\n  }\n} catch (e) {\n  //\
+            \ If we can't determine permissions, require validation\n  core.setOutput('skip_validation',\
+            \ 'false');\n  core.warning(`Permission lookup failed: ${e.message}`);\n\
+            }\n"
+      - env:
           IS_COMMUNITY_PROVIDER: ${{ steps.check.outputs.is_community_provider }}
-        run: |
-          printf '%s\n' "$PR_BODY" | tr -d '\r' > body.txt
+          PR_BODY: ${{ github.event.pull_request.body }}
+        if: 'github.event_name == ''pull_request_target'' &&
 
-          # Required sections from the template
-          required=( "# Description" "# How Has This Been Tested?" "# Checklist" )
-          err=0
+          github.event.pull_request.draft == false &&
 
-          # Check for required sections
-          for h in "${required[@]}"; do
-            grep -Fq "$h" body.txt || { echo "::error::$h missing"; err=1; }
-          done
+          steps.check.outputs.skip_validation != ''true''
 
-          # Check for issue reference - relaxed for community provider PRs
-          if [ "$IS_COMMUNITY_PROVIDER" = "true" ]; then
-            # For community provider PRs, accept either "Fixes #" or "Related to #" (case-insensitive)
-            if ! grep -Eiq '(Fixes #[0-9]+|Related to #[0-9]+)' body.txt; then
-              echo "::error::Issue reference missing (need 'Fixes #NNN' or 'Related to #NNN')"
-              err=1
-            fi
-          else
-            # For other PRs, require "Fixes #" with a number
-            if ! grep -Eq 'Fixes #[0-9]+' body.txt; then
-              echo "::error::Missing 'Fixes #NNN' reference"
-              err=1
-            fi
-          fi
+          '
+        name: Validate PR template
+        run: "printf '%s\\n' \"$PR_BODY\" | tr -d '\\r' > body.txt\n\n# Required sections\
+          \ from the template\nrequired=( \"# Description\" \"# How Has This Been\
+          \ Tested?\" \"# Checklist\" )\nerr=0\n\n# Check for required sections\n\
+          for h in \"${required[@]}\"; do\n  grep -Fq \"$h\" body.txt || { echo \"\
+          ::error::$h missing\"; err=1; }\ndone\n\n# Check for issue reference - relaxed\
+          \ for community provider PRs\nif [ \"$IS_COMMUNITY_PROVIDER\" = \"true\"\
+          \ ]; then\n  # For community provider PRs, accept either \"Fixes #\" or\
+          \ \"Related to #\" (case-insensitive)\n  if ! grep -Eiq '(Fixes #[0-9]+|Related\
+          \ to #[0-9]+)' body.txt; then\n    echo \"::error::Issue reference missing\
+          \ (need 'Fixes #NNN' or 'Related to #NNN')\"\n    err=1\n  fi\nelse\n  #\
+          \ For other PRs, require \"Fixes #\" with a number\n  if ! grep -Eq 'Fixes\
+          \ #[0-9]+' body.txt; then\n    echo \"::error::Missing 'Fixes #NNN' reference\"\
+          \n    err=1\n  fi\nfi\n\n# Check for placeholder text that should be replaced\n\
+          grep -Eiq 'Replace this with|Choose one:' body.txt && {\n  echo \"::error::Template\
+          \ placeholders still present\"; err=1;\n}\n\n# Also check for the unmodified\
+          \ issue number placeholder\ngrep -Fq 'Fixes #[issue number]' body.txt &&\
+          \ {\n  echo \"::error::Issue number placeholder not updated\"; err=1;\n\
+          }\n\nexit $err\n"
+      - id: measurement-3
+        name: Record Measurement After Validate PR template
+        uses: green-coding-solutions/eco-ci-energy-estimation@862050e4f01f65b1436e5eca18ba4bd85562f0de
+        with:
+          json-output: true
+          label: Validate PR template
+          task: get-measurement
+      - if: "github.event_name == 'pull_request_target' &&\n(github.event.pull_request.draft\
+          \ == true ||\n steps.check.outputs.skip_validation == 'true')\n"
+        name: Log skip reason
+        run: 'echo "Skipping PR template validation. Draft: ${{ github.event.pull_request.draft
+          }}; skip_validation: ${{ steps.check.outputs.skip_validation || ''N/A''
+          }}"
 
-          # Check for placeholder text that should be replaced
-          grep -Eiq 'Replace this with|Choose one:' body.txt && {
-            echo "::error::Template placeholders still present"; err=1;
-          }
-
-          # Also check for the unmodified issue number placeholder
-          grep -Fq 'Fixes #[issue number]' body.txt && {
-            echo "::error::Issue number placeholder not updated"; err=1;
-          }
-
-          exit $err
-
-      - name: Log skip reason
-        if: |
-          github.event_name == 'pull_request_target' &&
-          (github.event.pull_request.draft == true ||
-           steps.check.outputs.skip_validation == 'true')
-        run: |
-          echo "Skipping PR template validation. Draft: ${{ github.event.pull_request.draft }}; skip_validation: ${{ steps.check.outputs.skip_validation || 'N/A' }}"
+          '
+      - id: measurement-5
+        name: Record Measurement After Log skip reason
+        uses: green-coding-solutions/eco-ci-energy-estimation@862050e4f01f65b1436e5eca18ba4bd85562f0de
+        with:
+          json-output: true
+          label: Log skip reason
+          task: get-measurement
+      - id: display-measurement
+        name: Display Energy Results
+        uses: green-coding-solutions/eco-ci-energy-estimation@862050e4f01f65b1436e5eca18ba4bd85562f0de
+        with:
+          json-output: true
+          task: display-results
+      - name: Save Total Energy Consumption Data
+        run: echo '${{ steps.final-measurement.outputs.data-total-json }}' > total_energy_consumption.json
+      - name: Upload Energy Consumption Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-energy-consumption
+          path: total_energy_consumption.json
+permissions:
+  contents: read
+  pull-requests: read

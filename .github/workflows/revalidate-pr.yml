@@ -1,157 +1,109 @@
 name: Revalidate PR
-
 on:
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: 'PR number to validate'
-        required: true
-        type: string
-
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-  checks: write
-  statuses: write
+  push:
+    branches:
+      - main
 
 jobs:
   revalidate:
     runs-on: ubuntu-latest
     steps:
-      - name: Get PR data
-        id: pr_data
+      - name: Start Energy Measurement
+        uses: green-coding-solutions/eco-ci-energy-estimation@862050e4f01f65b1436e5eca18ba4bd85562f0de
+        with:
+          json-output: true
+          task: start-measurement
+      - id: pr_data
+        name: Get PR data
         uses: actions/github-script@v7
         with:
-          script: |
-            const { data: pr } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: ${{ inputs.pr_number }}
-            });
-
-            core.info(`Validating PR #${pr.number}: ${pr.title}`);
-            core.info(`Author: ${pr.user.login}`);
-            core.info(`Changes: +${pr.additions} -${pr.deletions}`);
-
-            // Store head SHA for creating status
-            core.setOutput('head_sha', pr.head.sha);
-
-            return pr;
-
+          script: "const { data: pr } = await github.rest.pulls.get({\n  owner: context.repo.owner,\n\
+            \  repo: context.repo.repo,\n  pull_number: ${{ inputs.pr_number }}\n\
+            });\n\ncore.info(`Validating PR #${pr.number}: ${pr.title}`);\ncore.info(`Author:\
+            \ ${pr.user.login}`);\ncore.info(`Changes: +${pr.additions} -${pr.deletions}`);\n\
+            \n// Store head SHA for creating status\ncore.setOutput('head_sha', pr.head.sha);\n\
+            \nreturn pr;\n"
       - name: Create pending status
         uses: actions/github-script@v7
         with:
-          script: |
-            await github.rest.repos.createCommitStatus({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              sha: '${{ steps.pr_data.outputs.head_sha }}',
-              state: 'pending',
-              context: 'Manual Validation',
-              description: 'Running validation checks...'
-            });
-
-      - name: Validate PR
-        id: validate
+          script: "await github.rest.repos.createCommitStatus({\n  owner: context.repo.owner,\n\
+            \  repo: context.repo.repo,\n  sha: '${{ steps.pr_data.outputs.head_sha\
+            \ }}',\n  state: 'pending',\n  context: 'Manual Validation',\n  description:\
+            \ 'Running validation checks...'\n});\n"
+      - id: validate
+        name: Validate PR
         uses: actions/github-script@v7
         with:
-          script: |
-            const pr = ${{ steps.pr_data.outputs.result }};
-            const errors = [];
-            let passed = true;
-
-            // Check size
-            const totalChanges = pr.additions + pr.deletions;
-            const MAX_LINES = 1000;
-            if (totalChanges > MAX_LINES) {
-              errors.push(`PR size (${totalChanges} lines) exceeds ${MAX_LINES} line limit`);
-              passed = false;
-            }
-
-            // Check template
-            const body = pr.body || '';
-            const requiredSections = ["# Description", "Fixes #", "# How Has This Been Tested?", "# Checklist"];
-            const missingSections = requiredSections.filter(section => !body.includes(section));
-
-            if (missingSections.length > 0) {
-              errors.push(`Missing PR template sections: ${missingSections.join(', ')}`);
-              passed = false;
-            }
-
-            if (body.match(/Replace this with|Choose one:|Fixes #\[issue number\]/i)) {
-              errors.push('PR template contains unmodified placeholders');
-              passed = false;
-            }
-
-            // Check linked issue
-            const issueMatch = body.match(/(?:Fixes|Closes|Resolves)\s+#(\d+)/i);
-            if (!issueMatch) {
-              errors.push('No linked issue found');
-              passed = false;
-            }
-
-            // Store results
-            core.setOutput('passed', passed);
-            core.setOutput('errors', errors.join('; '));
-            core.setOutput('totalChanges', totalChanges);
-            core.setOutput('hasTemplate', missingSections.length === 0);
-            core.setOutput('hasIssue', !!issueMatch);
-
-            if (!passed) {
-              core.setFailed(errors.join('; '));
-            }
-
-      - name: Update commit status
-        if: always()
+          script: "const pr = ${{ steps.pr_data.outputs.result }};\nconst errors =\
+            \ [];\nlet passed = true;\n\n// Check size\nconst totalChanges = pr.additions\
+            \ + pr.deletions;\nconst MAX_LINES = 1000;\nif (totalChanges > MAX_LINES)\
+            \ {\n  errors.push(`PR size (${totalChanges} lines) exceeds ${MAX_LINES}\
+            \ line limit`);\n  passed = false;\n}\n\n// Check template\nconst body\
+            \ = pr.body || '';\nconst requiredSections = [\"# Description\", \"Fixes\
+            \ #\", \"# How Has This Been Tested?\", \"# Checklist\"];\nconst missingSections\
+            \ = requiredSections.filter(section => !body.includes(section));\n\nif\
+            \ (missingSections.length > 0) {\n  errors.push(`Missing PR template sections:\
+            \ ${missingSections.join(', ')}`);\n  passed = false;\n}\n\nif (body.match(/Replace\
+            \ this with|Choose one:|Fixes #\\[issue number\\]/i)) {\n  errors.push('PR\
+            \ template contains unmodified placeholders');\n  passed = false;\n}\n\
+            \n// Check linked issue\nconst issueMatch = body.match(/(?:Fixes|Closes|Resolves)\\\
+            s+#(\\d+)/i);\nif (!issueMatch) {\n  errors.push('No linked issue found');\n\
+            \  passed = false;\n}\n\n// Store results\ncore.setOutput('passed', passed);\n\
+            core.setOutput('errors', errors.join('; '));\ncore.setOutput('totalChanges',\
+            \ totalChanges);\ncore.setOutput('hasTemplate', missingSections.length\
+            \ === 0);\ncore.setOutput('hasIssue', !!issueMatch);\n\nif (!passed) {\n\
+            \  core.setFailed(errors.join('; '));\n}\n"
+      - if: always()
+        name: Update commit status
         uses: actions/github-script@v7
         with:
-          script: |
-            const passed = ${{ steps.validate.outputs.passed }};
-            const errors = '${{ steps.validate.outputs.errors }}';
-
-            await github.rest.repos.createCommitStatus({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              sha: '${{ steps.pr_data.outputs.head_sha }}',
-              state: passed ? 'success' : 'failure',
-              context: 'Manual Validation',
-              description: passed ? 'All validation checks passed' : errors.substring(0, 140),
-              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
-            });
-
-      - name: Add validation comment
-        if: always()
+          script: "const passed = ${{ steps.validate.outputs.passed }};\nconst errors\
+            \ = '${{ steps.validate.outputs.errors }}';\n\nawait github.rest.repos.createCommitStatus({\n\
+            \  owner: context.repo.owner,\n  repo: context.repo.repo,\n  sha: '${{\
+            \ steps.pr_data.outputs.head_sha }}',\n  state: passed ? 'success' : 'failure',\n\
+            \  context: 'Manual Validation',\n  description: passed ? 'All validation\
+            \ checks passed' : errors.substring(0, 140),\n  target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`\n\
+            });\n"
+      - if: always()
+        name: Add validation comment
         uses: actions/github-script@v7
         with:
-          script: |
-            const pr = ${{ steps.pr_data.outputs.result }};
-            const passed = ${{ steps.validate.outputs.passed }};
-            const totalChanges = ${{ steps.validate.outputs.totalChanges }};
-            const hasTemplate = ${{ steps.validate.outputs.hasTemplate }};
-            const hasIssue = ${{ steps.validate.outputs.hasIssue }};
-            const errors = '${{ steps.validate.outputs.errors }}'.split('; ').filter(e => e);
-
-            let body = `### Manual Validation Results\n\n`;
-            body += `**Status**: ${passed ? '✅ Passed' : '❌ Failed'}\n\n`;
-            body += `| Check | Status | Details |\n`;
-            body += `|-------|--------|----------|\n`;
-            body += `| PR Size | ${totalChanges <= 1000 ? '✅' : '❌'} | ${totalChanges} lines ${totalChanges > 1000 ? '(exceeds 1000 limit)' : ''} |\n`;
-            body += `| Template | ${hasTemplate ? '✅' : '❌'} | ${hasTemplate ? 'Complete' : 'Missing required sections'} |\n`;
-            body += `| Linked Issue | ${hasIssue ? '✅' : '❌'} | ${hasIssue ? 'Found' : 'Missing Fixes/Closes #XXX'} |\n`;
-
-            if (errors.length > 0) {
-              body += `\n**Errors:**\n`;
-              errors.forEach(error => {
-                body += `- ❌ ${error}\n`;
-              });
-            }
-
-            body += `\n[View workflow run](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`;
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: pr.number,
-              body: body
-            });
+          script: "const pr = ${{ steps.pr_data.outputs.result }};\nconst passed =\
+            \ ${{ steps.validate.outputs.passed }};\nconst totalChanges = ${{ steps.validate.outputs.totalChanges\
+            \ }};\nconst hasTemplate = ${{ steps.validate.outputs.hasTemplate }};\n\
+            const hasIssue = ${{ steps.validate.outputs.hasIssue }};\nconst errors\
+            \ = '${{ steps.validate.outputs.errors }}'.split('; ').filter(e => e);\n\
+            \nlet body = `### Manual Validation Results\\n\\n`;\nbody += `**Status**:\
+            \ ${passed ? '\u2705 Passed' : '\u274C Failed'}\\n\\n`;\nbody += `| Check\
+            \ | Status | Details |\\n`;\nbody += `|-------|--------|----------|\\\
+            n`;\nbody += `| PR Size | ${totalChanges <= 1000 ? '\u2705' : '\u274C\
+            '} | ${totalChanges} lines ${totalChanges > 1000 ? '(exceeds 1000 limit)'\
+            \ : ''} |\\n`;\nbody += `| Template | ${hasTemplate ? '\u2705' : '\u274C\
+            '} | ${hasTemplate ? 'Complete' : 'Missing required sections'} |\\n`;\n\
+            body += `| Linked Issue | ${hasIssue ? '\u2705' : '\u274C'} | ${hasIssue\
+            \ ? 'Found' : 'Missing Fixes/Closes #XXX'} |\\n`;\n\nif (errors.length\
+            \ > 0) {\n  body += `\\n**Errors:**\\n`;\n  errors.forEach(error => {\n\
+            \    body += `- \u274C ${error}\\n`;\n  });\n}\n\nbody += `\\n[View workflow\
+            \ run](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`;\n\
+            \nawait github.rest.issues.createComment({\n  owner: context.repo.owner,\n\
+            \  repo: context.repo.repo,\n  issue_number: pr.number,\n  body: body\n\
+            });\n"
+      - id: display-measurement
+        name: Display Energy Results
+        uses: green-coding-solutions/eco-ci-energy-estimation@862050e4f01f65b1436e5eca18ba4bd85562f0de
+        with:
+          json-output: true
+          task: display-results
+      - name: Save Total Energy Consumption Data
+        run: echo '${{ steps.final-measurement.outputs.data-total-json }}' > total_energy_consumption.json
+      - name: Upload Energy Consumption Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-energy-consumption
+          path: total_energy_consumption.json
+permissions:
+  checks: write
+  contents: read
+  issues: write
+  pull-requests: write
+  statuses: write
